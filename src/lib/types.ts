@@ -145,6 +145,8 @@ export interface FilterParams {
   year?: string[];
   type?: string[];
   status?: string[];
+  language?: string[];
+  rating?: string[];
   sort?: string;
   page?: string;
 }
@@ -155,6 +157,8 @@ export interface FilterOptions {
   types: string[];
   seasons: string[];
   statuses: string[];
+  languages: string[];
+  ratings: string[];
   sorts: string[];
 }
 

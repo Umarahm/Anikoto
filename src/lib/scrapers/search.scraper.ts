@@ -68,6 +68,8 @@ function buildFilterUrl(params: FilterParams): string {
   if (params.year?.length) params.year.forEach((y) => qs.append('year[]', y));
   if (params.type?.length) params.type.forEach((t) => qs.append('type[]', t));
   if (params.status?.length) params.status.forEach((s) => qs.append('status[]', s));
+  if (params.language?.length) params.language.forEach((l) => qs.append('language[]', l));
+  if (params.rating?.length) params.rating.forEach((r) => qs.append('rating[]', r));
   if (params.sort) qs.set('sort', params.sort);
   if (params.page) qs.set('page', params.page);
   return `/filter?${qs.toString()}`;

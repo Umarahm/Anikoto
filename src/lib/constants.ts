@@ -34,5 +34,7 @@ export const FILTER_OPTIONS = {
   types: ["tv", "movie", "ova", "ona", "special", "music"],
   seasons: ["spring", "summer", "fall", "winter"],
   statuses: ["currently-airing", "finished-airing", "not-yet-aired"],
+  languages: ["sub", "dub"],
+  ratings: ["PG", "PG-13", "G", "R", "R+", "Rx"],
   sorts: ["default", "recently-added", "recently-updated", "score", "name-a-z", "released-date", "most-watched"]
 };
