@@ -1,6 +1,25 @@
-# Anikoto Scraper API
+<div align="center">
+  <h1>Anikoto Scraper API</h1>
+  
+  <p><strong>A high-performance REST API for scraping anime data from anikoto.net, built with Next.js 16</strong></p>
 
-A high-performance REST API for scraping anime data from [anikoto.net](https://anikoto.net), built with **Next.js 16**, **Cheerio**, and **Node-Cache** (in-memory caching).
+  <p>
+    <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FTeramoto669%2Fanikoto-scrap-api"><img src="https://vercel.com/button" alt="Deploy with Vercel"></a>
+    <img src="https://img.shields.io/badge/Next.js-16-black?style=flat&logo=next.js" alt="Next.js 16">
+    <img src="https://img.shields.io/badge/TypeScript-5.0-blue?style=flat&logo=typescript" alt="TypeScript">
+    <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT">
+  </p>
+
+  <p>Author: <strong>Teramoto</strong></p>
+
+  <p>
+    <a href="#-features">Features</a> • 
+    <a href="#-getting-started">Quick Start</a> • 
+    <a href="#-api-overview">API Endpoints</a> • 
+    <a href="#%EF%B8%8F-project-structure">Project Structure</a> • 
+    <a href="#%E2%98%81%EF%B8%8F-cloudflare-worker-proxy-optional">Deployment</a>
+  </p>
+</div>
 
 > **For educational purposes only.** This project is not affiliated with anikoto.net.
 
