@@ -45,7 +45,7 @@ npm install
 npm run dev
 ```
 
-Open [https://anikoto-scrap-api.vercel.app](https://anikoto-scrap-api.vercel.app) to see the interactive API docs.
+Open [http://localhost:3000](http://localhost:3000) to see the interactive API docs.
 
 ---
 
