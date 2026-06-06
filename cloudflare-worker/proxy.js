@@ -19,7 +19,7 @@ export default {
     }
 
     const { searchParams } = new URL(request.url);
-    const target  = searchParams.get('url');
+    const target = searchParams.get('url');
     const referer = searchParams.get('referer');
 
     if (!target) {
@@ -33,7 +33,7 @@ export default {
     };
     if (referer) {
       upstreamHeaders['Referer'] = referer;
-      try { upstreamHeaders['Origin'] = new URL(referer).origin; } catch (_) {}
+      try { upstreamHeaders['Origin'] = new URL(referer).origin; } catch (_) { }
     }
 
     let upstreamRes;
@@ -48,8 +48,8 @@ export default {
     }
 
     const contentType = upstreamRes.headers.get('content-type') || '';
-    const isManifest  = /\.m3u8/i.test(target) || contentType.includes('mpegurl');
-    const isSubtitle  = /\.vtt/i.test(target) || contentType.includes('vtt');
+    const isManifest = /\.m3u8/i.test(target) || contentType.includes('mpegurl');
+    const isSubtitle = /\.vtt/i.test(target) || contentType.includes('vtt');
 
     // ── Subtitle → proxy as-is ───────────────────────────────────────────────
     if (isSubtitle) {
@@ -108,10 +108,10 @@ export default {
     // CDNs disguise .ts segments as image/jpg, image/png etc. to prevent hotlinking.
     // Force application/octet-stream so HLS.js decodes them correctly.
     const isRealMedia = contentType.includes('video') ||
-                        contentType.includes('audio') ||
-                        contentType.includes('octet-stream') ||
-                        contentType.includes('mp4') ||
-                        contentType.includes('mpegurl');
+      contentType.includes('audio') ||
+      contentType.includes('octet-stream') ||
+      contentType.includes('mp4') ||
+      contentType.includes('mpegurl');
 
     return new Response(upstreamRes.body, {
       status: upstreamRes.status,

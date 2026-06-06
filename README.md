@@ -51,7 +51,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to see the interactive API docs.
+Open [http://localhost:5007](http://localhost:5007) to see the interactive API docs.
 
 ---
 
