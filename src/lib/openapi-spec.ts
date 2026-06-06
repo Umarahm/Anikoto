@@ -202,7 +202,7 @@ const spec = {
         tags: ["Anime"],
         summary: "Anime detail",
         description:
-          "Get full anime info: title, synopsis, genres, studios, MAL score, episode count, and airing status.",
+          "Get full anime info: title, synopsis, genres, studios, MAL score, episode count, and airing status. Optionally filter the included episode list by range using start and end parameters.",
         operationId: "getAnimeDetail",
         parameters: [
           {
@@ -212,6 +212,22 @@ const spec = {
             description: "Anime slug from the URL",
             schema: { type: "string" },
             example: "one-piece-odmau",
+          },
+          {
+            name: "start",
+            in: "query",
+            required: false,
+            description: "Starting episode number to include (inclusive). Must be used together with end.",
+            schema: { type: "integer" },
+            example: 1,
+          },
+          {
+            name: "end",
+            in: "query",
+            required: false,
+            description: "Ending episode number to include (inclusive). Must be used together with start.",
+            schema: { type: "integer" },
+            example: 12,
           },
           {
             name: "refresh",
@@ -237,6 +253,7 @@ const spec = {
               },
             },
           },
+          "400": { description: "Invalid or incomplete episode range parameters" },
           "404": { description: "Anime not found" },
           "500": { description: "Internal server error" },
         },

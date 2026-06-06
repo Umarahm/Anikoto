@@ -30,6 +30,18 @@ export interface WatchData {
   sources: VideoSource[];
 }
 
+/** Cap individual server fetch+extraction so a single slow server can't block everything. */
+const SERVER_TIMEOUT_MS = 6000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timed out after ${ms}ms (${label})`)), ms)
+    ),
+  ]);
+}
+
 export async function scrapeWatch(slug: string, epNum: string): Promise<WatchData> {
   const { episodes } = await scrapeAnimeEpisodes(slug);
   const ep = episodes.find((e) => e.number === epNum);
@@ -80,35 +92,43 @@ export async function scrapeWatch(slug: string, epNum: string): Promise<WatchDat
     return `${baseUrl}${separator}${urlParam}${refererParam}`;
   };
 
-  // 2. Fetch all iframe URLs
+  // 2. Fetch embed URL + extract m3u8 for all servers in parallel.
+  //    Each server is individually capped at SERVER_TIMEOUT_MS so a single
+  //    slow/unreachable server cannot stall the entire response.
   const sources: VideoSource[] = [];
-  
+
   await Promise.all(
     servers.map(async (server) => {
       try {
-        const sourceData = await fetchJson<{ status: boolean; result: { url: string } }>(
-          `/ajax/server?get=${server.id}`
-        );
-        if (sourceData.status && sourceData.result?.url) {
-          const embedUrl = sourceData.result.url;
-          // 3. Extract the actual m3u8 stream link and referer
-          const extracted = await extractStreamUrl(embedUrl);
+        await withTimeout(
+          (async () => {
+            const sourceData = await fetchJson<{ status: boolean; result: { url: string } }>(
+              `/ajax/server?get=${server.id}`
+            );
+            if (sourceData.status && sourceData.result?.url) {
+              const embedUrl = sourceData.result.url;
+              // 3. Extract the actual m3u8 stream link and referer
+              const extracted = await extractStreamUrl(embedUrl);
 
-          sources.push({
-            server: server.name,
-            type: server.type,
-            url: embedUrl,
-            m3u8: extracted?.m3u8 ?? null,
-            referer: extracted?.referer,
-            proxyUrl: extracted?.m3u8 ? getProxyUrl(extracted.m3u8, extracted.referer) : null,
-            tracks: extracted?.tracks?.map(t => ({
-              ...t,
-              proxyUrl: getProxyUrl(t.file, extracted.referer)
-            })) || [],
-          });
-        }
+              sources.push({
+                server: server.name,
+                type: server.type,
+                url: embedUrl,
+                m3u8: extracted?.m3u8 ?? null,
+                referer: extracted?.referer,
+                proxyUrl: extracted?.m3u8 ? getProxyUrl(extracted.m3u8, extracted.referer) : null,
+                tracks: extracted?.tracks?.map(t => ({
+                  ...t,
+                  proxyUrl: getProxyUrl(t.file, extracted.referer)
+                })) || [],
+              });
+            }
+          })(),
+          SERVER_TIMEOUT_MS,
+          server.name
+        );
       } catch (err) {
-        console.error(`Failed to fetch source for server ${server.id}`, err);
+        console.error(`Skipping server ${server.name} (${server.id}):`, err instanceof Error ? err.message : err);
       }
     })
   );

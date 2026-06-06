@@ -2,10 +2,15 @@ import * as cheerio from 'cheerio';
 import { fetchPage } from '../fetcher';
 import { AnimeDetail, Episode, AnimeEpisodes } from '../types';
 import { BASE_URL } from '../constants';
+import { getOrSet } from '../cache';
+import { CACHE_TTL } from '../constants';
 
 // ─── Anime Detail ────────────────────────────────────────────────────────────
 
-export async function scrapeAnimeDetail(slug: string): Promise<AnimeDetail> {
+export async function scrapeAnimeDetail(
+  slug: string,
+  prefetchedEpisodes?: AnimeEpisodes
+): Promise<AnimeDetail> {
   const $ = await fetchPage(`/watch/${slug}`);
 
   const $main = $('#watch-main');
@@ -72,7 +77,8 @@ export async function scrapeAnimeDetail(slug: string): Promise<AnimeDetail> {
     return $(el).clone().children().remove().end().text().trim().toLowerCase().startsWith('episode');
   }).find('span').text().trim();
 
-  const episodes = await scrapeAnimeEpisodes(slug);
+  // Reuse pre-fetched episodes to avoid a redundant scrape
+  const episodes = prefetchedEpisodes ?? await scrapeAnimeEpisodes(slug);
 
   return {
     id: animeId,
@@ -104,60 +110,69 @@ export async function scrapeAnimeDetail(slug: string): Promise<AnimeDetail> {
 // ─── Episode List ─────────────────────────────────────────────────────────────
 
 /**
- * Scrapes the episode list from the watch page embedded episode section.
- * The site loads episodes dynamically; we also try the static HTML as a fallback.
+ * Fetches all episodes (unfiltered) from the watch page + AJAX fallback.
+ * Result is internally cached by animeId so that subsequent callers
+ * (e.g. scrapeWatch) do not re-fetch the same data within the same TTL window.
  */
+async function fetchAllEpisodes(slug: string): Promise<AnimeEpisodes> {
+  const cacheKey = `anime:episodes:raw:${slug}`;
+  return getOrSet(cacheKey, async () => {
+    const { fetchJson } = await import('../fetcher');
+    const $ = await fetchPage(`/watch/${slug}`);
+    const animeId = $('#watch-main').attr('data-id') ?? '';
+
+    // If the episodes container is empty or loading, fetch via AJAX
+    if (animeId && $('#w-episodes a').length === 0) {
+      try {
+        const data = await fetchJson<{ status: boolean; result: string }>(`/ajax/episode/list/${animeId}`);
+        if (data && data.result) {
+          // Load the HTML chunk from AJAX into cheerio
+          const ajaxDoc = cheerio.load(data.result);
+          $('#w-episodes').html(ajaxDoc.html());
+        }
+      } catch (err) {
+        console.error('Failed to fetch episodes via AJAX:', err);
+      }
+    }
+
+    const allEpisodes: Episode[] = [];
+
+    // Episodes rendered as <li> inside #w-episodes
+    $('#w-episodes ul.ep-range li a, #w-episodes a[href], #w-episodes a[data-num]').each((_, el) => {
+      const $el = $(el);
+      const href = $el.attr('href') ?? '';
+      // Sometimes it's an anchor without href but with data-num on the watch page
+      if (!href.includes('/watch/') && !$el.attr('data-num')) return;
+
+      const epNum = $el.attr('data-num')
+        || $el.find('.number, .d-title, span').first().text().trim()
+        || href.split('/ep-')[1]
+        || '';
+
+      allEpisodes.push({
+        number: epNum || String(allEpisodes.length + 1),
+        title: $el.attr('title')?.trim() || undefined,
+        href,
+        id: $el.attr('data-id') ?? undefined,
+        dataIds: $el.attr('data-ids') ?? $el.attr('data-id') ?? undefined,
+        hasDub: $el.find('.ep-status.dub').length > 0 || $el.text().toLowerCase().includes('dub') || $el.attr('data-dub') === '1',
+        hasSub: $el.find('.ep-status.sub').length > 0 || $el.text().toLowerCase().includes('sub') || $el.attr('data-sub') === '1',
+      });
+    });
+
+    return { animeId, slug, episodes: allEpisodes };
+  }, CACHE_TTL.EPISODE);
+}
+
 export async function scrapeAnimeEpisodes(
   slug: string,
   startEpisode?: number,
   endEpisode?: number
 ): Promise<AnimeEpisodes> {
-  const $ = await fetchPage(`/watch/${slug}`);
-  const animeId = $('#watch-main').attr('data-id') ?? '';
-
-  // If the episodes container is empty or loading, fetch via AJAX
-  if (animeId && $('#w-episodes a').length === 0) {
-    try {
-      const { fetchJson } = await import('../fetcher');
-      const data = await fetchJson<{ status: boolean; result: string }>(`/ajax/episode/list/${animeId}`);
-      if (data && data.result) {
-        // Load the HTML chunk from AJAX into cheerio
-        const ajaxDoc = cheerio.load(data.result);
-        $('#w-episodes').html(ajaxDoc.html());
-      }
-    } catch (err) {
-      console.error('Failed to fetch episodes via AJAX:', err);
-    }
-  }
-
-  const allEpisodes: Episode[] = [];
-
-  // Episodes rendered as <li> inside #w-episodes
-  $('#w-episodes ul.ep-range li a, #w-episodes a[href], #w-episodes a[data-num]').each((_, el) => {
-    const $el = $(el);
-    const href = $el.attr('href') ?? '';
-    // Sometimes it's an anchor without href but with data-num on the watch page
-    if (!href.includes('/watch/') && !$el.attr('data-num')) return;
-
-    const epNum = $el.attr('data-num') 
-      || $el.find('.number, .d-title, span').first().text().trim()
-      || href.split('/ep-')[1]
-      || '';
-
-    allEpisodes.push({
-      number: epNum || String(allEpisodes.length + 1),
-      title: $el.attr('title')?.trim() || undefined,
-      href,
-      id: $el.attr('data-id') ?? undefined,
-      dataIds: $el.attr('data-ids') ?? $el.attr('data-id') ?? undefined,
-      hasDub: $el.find('.ep-status.dub').length > 0 || $el.text().toLowerCase().includes('dub') || $el.attr('data-dub') === '1',
-      hasSub: $el.find('.ep-status.sub').length > 0 || $el.text().toLowerCase().includes('sub') || $el.attr('data-sub') === '1',
-    });
-  });
-
-  let filteredEpisodes = allEpisodes;
+  const { animeId, episodes: allEpisodes } = await fetchAllEpisodes(slug);
 
   // Apply range filtering if startEpisode and endEpisode are provided
+  let filteredEpisodes = allEpisodes;
   if (startEpisode !== undefined && endEpisode !== undefined) {
     filteredEpisodes = allEpisodes.filter((ep) => {
       const num = parseInt(ep.number, 10);
