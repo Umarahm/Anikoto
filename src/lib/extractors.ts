@@ -137,17 +137,41 @@ export async function extractMegaplay(embedUrl: string): Promise<ExtractedStream
 
 /**
  * Public wrapper — fetches the Megacloud embed page then extracts the stream.
+ * Handles Retry-After rate-limit responses from megacloud.blog (max 2 retries).
  * Use extractStreamUrl() in most cases; this is exposed for direct use.
  */
-export async function extractMegacloud(embedUrl: string): Promise<ExtractedStream | null> {
+export async function extractMegacloud(
+  embedUrl: string,
+  _retries = 2
+): Promise<ExtractedStream | null> {
   try {
     const origin = new URL(embedUrl).origin;
     const referer = origin + '/';
-    const { data: html } = await axios.get<string>(embedUrl, {
+
+    // Use axios with validateStatus so we can inspect headers on rate-limit responses
+    const response = await axios.get<string>(embedUrl, {
       headers: { ...DEFAULT_HEADERS, Referer: referer },
-      timeout: 5000,
+      timeout: 10000,
+      validateStatus: () => true, // don't throw on non-2xx
     });
-    return await _doMegacloud(embedUrl, html, referer);
+
+    // Handle rate-limit: megacloud.blog returns Retry-After when rate-limited
+    const retryAfter = response.headers['retry-after'];
+    if (retryAfter && _retries > 0) {
+      const waitMs = (parseInt(retryAfter, 10) || 60) * 1000;
+      console.warn(
+        `[Megacloud] Rate limited. Retrying in ${waitMs / 1000}s... (${_retries} retries left)`
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+      return extractMegacloud(embedUrl, _retries - 1);
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error(`[Megacloud] HTTP ${response.status} for ${embedUrl}`);
+      return null;
+    }
+
+    return await _doMegacloud(embedUrl, response.data, referer);
   } catch (err) {
     console.error('Megacloud extraction failed:', err);
     return null;
@@ -162,6 +186,7 @@ export async function extractMegacloud(embedUrl: string): Promise<ExtractedStrea
  *   • megaplay.buzz      → extractMegaplay
  *   • vidwish.live       → map to megaplay.buzz → extractMegaplay
  *   • megacloud.bloggy.click → map to megaplay.buzz → extractMegaplay
+ *   • vidtube.site       → extractMegaplay (Megaplay clone, same API)
  *   • megacloud.blog     → extractMegacloud
  *
  * ── Slow path (unknown host) ─────────────────────────────────────────────────
@@ -186,6 +211,12 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
 
   if (hostname.includes('megacloud.blog')) {
     return extractMegacloud(embedUrl);
+  }
+
+  // VidTube (vidtube.site) is a Megaplay clone — identical HTML structure
+  // (title='File {id}', player id='megaplay-player') and the same getSources?id= API.
+  if (hostname.includes('vidtube.site')) {
+    return extractMegaplay(embedUrl);
   }
 
   // ── Slow path: unknown host ──────────────────────────────────────────────────

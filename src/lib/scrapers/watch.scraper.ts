@@ -3,11 +3,13 @@ import { fetchJson } from '../fetcher';
 import { scrapeAnimeEpisodes } from './anime.scraper';
 import { Episode } from '../types';
 import { extractStreamUrl, SubtitleTrack } from '../extractors';
+import { BASE_URL } from '../constants';
 
 export interface VideoServer {
-  id: string; // linkId
-  name: string; // server name (e.g. Vidstreaming, MegaCloud)
-  type: string; // "sub" | "dub" | "softsub"
+  id: string;    // linkId
+  name: string;  // server name (e.g. Vidstreaming, MegaCloud)
+  type: string;  // "sub" | "dub" | "softsub"
+  svId?: string; // data-sv-id (server type identifier used by anikoto AJAX)
 }
 
 export interface VideoTrack extends SubtitleTrack {
@@ -31,7 +33,7 @@ export interface WatchData {
 }
 
 /** Cap individual server fetch+extraction so a single slow server can't block everything. */
-const SERVER_TIMEOUT_MS = 6000;
+const SERVER_TIMEOUT_MS = 15000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -70,25 +72,27 @@ export async function scrapeWatch(slug: string, epNum: string): Promise<WatchDat
     const $typeContainer = $el.closest('.type');
     const typeLabel = $typeContainer.find('label, .name').text().trim().toLowerCase();
     const serverName = $el.text().trim();
+    const svId = $el.attr('data-sv-id') || '';
 
     servers.push({
       id: linkId,
       name: serverName,
       type: typeLabel || 'sub',
+      svId,
     });
   });
 
   // Helper to generate proxy URLs using either Cloudflare Worker or internal Next.js proxy
   const getProxyUrl = (targetUrl: string, referer?: string) => {
     const rawBaseUrl = process.env.NEXT_PUBLIC_CF_WORKER_URL || process.env.CF_WORKER_URL || '/api/proxy';
-    const baseUrl = rawBaseUrl.trim();
+    let baseUrl = rawBaseUrl.trim();
+    // Normalize: add https:// if the value is a bare domain (no protocol, not a relative path)
+    if (baseUrl && !baseUrl.startsWith('http') && !baseUrl.startsWith('/')) {
+      baseUrl = `https://${baseUrl}`;
+    }
     const separator = baseUrl.includes('?') ? '&' : '?';
     const urlParam = `url=${encodeURIComponent(targetUrl)}`;
     const refererParam = referer ? `&referer=${encodeURIComponent(referer)}` : '';
-    
-    if (baseUrl.endsWith('/')) {
-      return `${baseUrl}?${urlParam}${refererParam}`;
-    }
     return `${baseUrl}${separator}${urlParam}${refererParam}`;
   };
 
@@ -102,8 +106,13 @@ export async function scrapeWatch(slug: string, epNum: string): Promise<WatchDat
       try {
         await withTimeout(
           (async () => {
+            // Build AJAX URL — include sv (server type ID) when available, as some
+            // servers (e.g. VidPlay) require it to avoid a 400 response.
+            const svParam = server.svId ? `&sv=${server.svId}` : '';
+            const epReferer = `${BASE_URL}/watch/${slug}/ep-${epNum}`;
             const sourceData = await fetchJson<{ status: boolean; result: { url: string } }>(
-              `/ajax/server?get=${server.id}`
+              `/ajax/server?get=${server.id}${svParam}`,
+              { Referer: epReferer }
             );
             if (sourceData.status && sourceData.result?.url) {
               const embedUrl = sourceData.result.url;
