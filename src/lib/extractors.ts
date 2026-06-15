@@ -1,8 +1,33 @@
 import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants';
 
-// ─── Kiwi Mapper CDN URL helper ──────────────────────────────────────────────
-const KIWI_MAPPER_URL = 'https://mapper.mewcdn.online/api/mal';
+const KIWI_MAPPER_URLS = [
+  'https://mapper.nekostream.site/api/mal',
+  'https://mapper.mewcdn.online/api/mal'
+async function parseM3u8Subtitles(
+  m3u8Url: string,
+  referer: string
+): Promise<{ file: string; label?: string; kind?: string; default?: boolean }[]> {
+  try {
+    const { data } = await axios.get<string>(m3u8Url, {
+      headers: { ...DEFAULT_HEADERS, Referer: referer },
+      timeout: 5000,
+    });
+    const tracks: { file: string; label?: string; kind?: string; default?: boolean }[] = [];
+    for (const line of data.split('\n')) {
+      if (!line.startsWith('#EXT-X-MEDIA') || !line.includes('TYPE=SUBTITLES')) continue;
+      const uri = line.match(/URI="([^"]+)"/)?.[1];
+      if (!uri) continue;
+      const label = line.match(/NAME="([^"]+)"/)?.[1];
+      const isDefault = /DEFAULT=YES/i.test(line);
+      const fullUri = uri.startsWith('http') ? uri : new URL(uri, m3u8Url).toString();
+      tracks.push({ file: fullUri, label: label || 'Unknown', kind: 'subtitles', default: isDefault });
+    }
+    return tracks;
+  } catch {
+    return [];
+  }
+}
 
 export interface SubtitleTrack {
   file: string;
@@ -17,12 +42,9 @@ export interface ExtractedStream {
   tracks: SubtitleTrack[];
 }
 
-// ─── Module-level GitHub keys cache ──────────────────────────────────────────
-// Avoids re-fetching decryption keys from GitHub on every Megacloud request.
-
 let _keysCache: Record<string, string> | null = null;
 let _keysCacheAt = 0;
-const KEYS_CACHE_MS = 15 * 60 * 1000; // 15 minutes
+const KEYS_CACHE_MS = 15 * 60 * 1000;
 
 async function getMegacloudKeys(): Promise<Record<string, string>> {
   const now = Date.now();
@@ -36,12 +58,6 @@ async function getMegacloudKeys(): Promise<Record<string, string>> {
   return data;
 }
 
-// ─── Internal helpers (accept pre-fetched HTML to avoid double-fetch) ─────────
-
-/**
- * Extracts the m3u8 stream from a Megaplay embed page.
- * Accepts pre-fetched HTML so the caller doesn't need to GET the page twice.
- */
 async function _doMegaplay(
   host: string,
   html: string,
@@ -60,7 +76,6 @@ async function _doMegaplay(
   const tracks: SubtitleTrack[] = data?.tracks || [];
 
   if (m3u8 && m3u8.includes('mewstream.buzz')) {
-    // Bypass Cloudflare bot-protection blocks by replacing cdn.mewstream.buzz with lostproject.club mirror.
     let replacementHost = '1oe.lostproject.club';
     const firstTrack = tracks.find(t => t.file && !t.file.includes('mewstream.buzz'));
     if (firstTrack) {
@@ -78,10 +93,6 @@ async function _doMegaplay(
   return m3u8 ? { m3u8, referer, tracks } : null;
 }
 
-/**
- * Extracts the m3u8 stream from a Megacloud embed page.
- * Accepts pre-fetched HTML so the caller doesn't need to GET the page twice.
- */
 async function _doMegacloud(
   embedUrl: string,
   html: string,
@@ -116,7 +127,6 @@ async function _doMegacloud(
     return data.sources?.[0]?.file ? { m3u8: data.sources[0].file, referer, tracks } : null;
   }
 
-  // Encrypted — use cached keys to avoid a GitHub round-trip on every call
   const keys = await getMegacloudKeys();
   const secret = keys['mega'];
 
@@ -134,20 +144,6 @@ async function _doMegacloud(
   return m3u8 ? { m3u8, referer, tracks } : null;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Resolves a stream via the Kiwi/MewCDN mapper API.
- *
- * This bypasses mewstream.buzz entirely — the CDN used is kwik.cx2.mewcdn.online
- * which is not behind Cloudflare bot-protection.
- *
- * @param malId     - MAL ID of the anime (data-mal attribute from episode anchor)
- * @param epNum     - Episode number (1-based integer)
- * @param timestamp - Episode timestamp (data-timestamp attribute from episode anchor)
- * @param type      - 'sub' | 'dub'
- * @param baseUrl   - The anikoto base URL (used for /ajax/server lookup)
- */
 export async function extractKiwiMapper(
   malId: string,
   epNum: string | number,
@@ -155,79 +151,58 @@ export async function extractKiwiMapper(
   type: 'sub' | 'dub',
   baseUrl: string
 ): Promise<ExtractedStream | null> {
-  try {
-    const mapperUrl = `${KIWI_MAPPER_URL}/${encodeURIComponent(malId)}/${encodeURIComponent(epNum)}/${encodeURIComponent(timestamp)}`;
-    const { data } = await axios.get(mapperUrl, {
-      headers: {
-        ...DEFAULT_HEADERS,
-        Referer: baseUrl + '/',
-        Origin: baseUrl,
-      },
-      timeout: 8000,
-    });
+  for (const mapperBase of KIWI_MAPPER_URLS) {
+    try {
+      const mapperUrl = `${mapperBase}/${encodeURIComponent(malId)}/${encodeURIComponent(epNum)}/${encodeURIComponent(timestamp)}`;
+      const { data } = await axios.get(mapperUrl, {
+        headers: {
+          ...DEFAULT_HEADERS,
+          Referer: baseUrl + '/',
+          Origin: baseUrl,
+        },
+        timeout: 8000,
+      });
 
-    if (!data || typeof data !== 'object') return null;
+      if (!data || typeof data !== 'object') continue;
 
-    // Find a stream key matching the requested quality + type, e.g. "Stream 1080"
-    // Fall back to any key containing the type if no quality-prefixed key found.
-    let serverCode: string | null = null;
-    const qualityPriority = ['1080', '720', '480', '360'];
-
-    for (const q of qualityPriority) {
-      const key = `Stream ${q}`;
-      if (data[key]?.[type]?.url) {
-        serverCode = data[key][type].url;
-        break;
-      }
-    }
-
-    // Fallback: any key that has the requested type
-    if (!serverCode) {
+      let serverCode: string | null = null;
       for (const key of Object.keys(data)) {
-        if (data[key]?.[type]?.url) {
-          serverCode = data[key][type].url;
+        if (key === 'status') continue;
+        const entry = data[key]?.[type];
+        if (entry?.url && typeof entry.url === 'string') {
+          serverCode = entry.url;
           break;
         }
       }
+
+      if (!serverCode) continue;
+
+      const { data: serverData } = await axios.get(`${baseUrl}/ajax/server?get=${serverCode}`, {
+        headers: { ...DEFAULT_HEADERS, 'X-Requested-With': 'XMLHttpRequest' },
+        timeout: 5000,
+      });
+
+      let embedUrl: string | null = serverData?.result?.url ?? null;
+      if (!embedUrl) continue;
+
+      if (embedUrl.includes('#')) {
+        try {
+          const encoded = embedUrl.split('#')[1];
+          embedUrl = Buffer.from(encoded, 'base64').toString('utf-8');
+        } catch (_) {}
+      }
+
+      const referer = 'https://kwik.cx2.mewcdn.online/';
+      const tracks = await parseM3u8Subtitles(embedUrl, referer);
+      return { m3u8: embedUrl, referer, tracks };
+    } catch (err) {
+      console.error(`[extractKiwiMapper] ${mapperBase} failed:`, err instanceof Error ? err.message : err);
     }
-
-    if (!serverCode) return null;
-
-    // Resolve the server code to an actual embed URL via anikoto AJAX
-    const { data: serverData } = await axios.get(`${baseUrl}/ajax/server?get=${serverCode}`, {
-      headers: { ...DEFAULT_HEADERS, 'X-Requested-With': 'XMLHttpRequest' },
-      timeout: 5000,
-    });
-
-    let embedUrl: string | null = serverData?.result?.url ?? null;
-    if (!embedUrl) return null;
-
-    // Some URLs are base64-encoded after "#"
-    if (embedUrl.includes('#')) {
-      try {
-        const encoded = embedUrl.split('#')[1];
-        embedUrl = Buffer.from(encoded, 'base64').toString('utf-8');
-      } catch (_) {}
-    }
-
-    const referer = 'https://kwik.cx2.mewcdn.online/';
-    return { m3u8: embedUrl, referer, tracks: [] };
-  } catch (err) {
-    console.error('[extractKiwiMapper] Failed:', err instanceof Error ? err.message : err);
-    return null;
   }
+
+  return null;
 }
 
-/**
- * Resolves a stream via VidStream's save_data.php endpoint.
- *
- * This approach extracts data-ep-id, type, and domain2_url directly from the
- * embed page, then calls {domain2}/save_data.php?id={epId}-{type} which returns
- * stream sources and subtitle tracks — completely independent of mewstream.buzz.
- *
- * @param embedUrl - The embed URL of the VidStream server
- * @param referer  - Referer to send with the request
- */
 export async function extractVidstream(
   embedUrl: string,
   referer: string
@@ -260,7 +235,6 @@ export async function extractVidstream(
 
     if (!m3u8) return null;
 
-    // Use domain2 as referer for CDN requests
     return { m3u8, referer: domain2 + '/', tracks };
   } catch (err) {
     console.error('[extractVidstream] Failed:', err instanceof Error ? err.message : err);
@@ -268,11 +242,6 @@ export async function extractVidstream(
   }
 }
 
-
-/**
- * Public wrapper — fetches the Megaplay embed page then extracts the stream.
- * Use extractStreamUrl() in most cases; this is exposed for direct use.
- */
 export async function extractMegaplay(embedUrl: string): Promise<ExtractedStream | null> {
   try {
     const host = new URL(embedUrl).host;
@@ -288,10 +257,6 @@ export async function extractMegaplay(embedUrl: string): Promise<ExtractedStream
   }
 }
 
-/**
- * Public wrapper — fetches the Megacloud embed page then extracts the stream.
- * Use extractStreamUrl() in most cases; this is exposed for direct use.
- */
 export async function extractMegacloud(embedUrl: string): Promise<ExtractedStream | null> {
   try {
     const origin = new URL(embedUrl).origin;
@@ -307,26 +272,9 @@ export async function extractMegacloud(embedUrl: string): Promise<ExtractedStrea
   }
 }
 
-/**
- * Resolves an embed URL to an ExtractedStream (m3u8 + referer + subtitle tracks).
- *
- * ── Fast path (most common) ──────────────────────────────────────────────────
- * Known providers are dispatched directly, skipping the intermediate HTML loop:
- *   • megaplay.buzz      → extractMegaplay
- *   • vidwish.live       → map to megaplay.buzz → extractMegaplay
- *   • megacloud.bloggy.click → map to megaplay.buzz → extractMegaplay
- *   • vidtube.site       → extractMegaplay (VidPlay, same Megaplay clone API)
- *   • megacloud.blog     → extractMegacloud
- *
- * ── Slow path (unknown host) ─────────────────────────────────────────────────
- * Fetches HTML, handles error-page fallbacks, follows up to 2 iframe hops.
- * The final HTML is passed directly into the extractor so no duplicate GET
- * is needed.
- */
 export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStream | null> {
   const hostname = new URL(embedUrl).hostname;
 
-  // ── Fast path ────────────────────────────────────────────────────────────────
   if (
     hostname.includes('megaplay.buzz') ||
     hostname.includes('vidwish.live') ||
@@ -342,12 +290,10 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
     return extractMegacloud(embedUrl);
   }
 
-  // VidPlay (vidtube.site) is a Megaplay clone — same <title>File {id} / getSources API.
   if (hostname.includes('vidtube.site')) {
     return extractMegaplay(embedUrl);
   }
 
-  // ── Slow path: unknown host ──────────────────────────────────────────────────
   let currentUrl = embedUrl;
 
   for (let i = 0; i < 2; i++) {
@@ -363,7 +309,6 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
           timeout: 5000,
         });
       } catch {
-        // Known-fallback hosts: try megaplay.buzz before giving up
         if (currentUrl.includes('vidwish.live') || currentUrl.includes('megacloud.bloggy.click')) {
           const fallbackUrl = currentUrl
             .replace('vidwish.live', 'megaplay.buzz')
@@ -382,7 +327,6 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
 
       html = response.data;
 
-      // Soft-error page check (200 OK but custom error content)
       const isErrorPage =
         html.includes('Error -') ||
         html.includes('error-container') ||
@@ -402,6 +346,18 @@ export async function extractStreamUrl(embedUrl: string): Promise<ExtractedStrea
         });
         currentUrl = fallbackUrl;
         html = response.data;
+      }
+
+      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+      if (iframeMatch) {
+        const resolved = new URL(iframeMatch[1], currentUrl).toString();
+        if (resolved !== currentUrl) {
+          currentUrl = resolved;
+          continue;
+        }
+      }
+
+ata;
       }
 
       // Follow iframe
