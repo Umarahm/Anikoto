@@ -87,7 +87,9 @@ export async function scrapeFilter(params: FilterParams): Promise<FilterResult> 
   );
 
   const currentPage = parseInt(params.page ?? '1', 10);
-  const hasNextPage = $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0;
+  const hasNextPage =
+    $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0 ||
+    $('.pagination a[rel="next"], .paging a[rel="next"], a[rel="next"]').length > 0;
 
   return { results, currentPage, hasNextPage, params };
 }
@@ -106,7 +108,9 @@ export async function scrapeListingPage(
     '.film_list-wrap .flw-item, .ani.items .item, .items .item, .page-content .item'
   );
 
-  const hasNextPage = $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0;
+  const hasNextPage =
+    $('.paging .next:not(.disabled), .pagination .next:not(.disabled)').length > 0 ||
+    $('.pagination a[rel="next"], .paging a[rel="next"], a[rel="next"]').length > 0;
 
   return { results, currentPage: page, hasNextPage };
 }
