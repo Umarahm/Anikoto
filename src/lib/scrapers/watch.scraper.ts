@@ -2,12 +2,14 @@ import * as cheerio from 'cheerio';
 import { fetchJson } from '../fetcher';
 import { scrapeAnimeEpisodes } from './anime.scraper';
 import { Episode } from '../types';
-import { extractStreamUrl, SubtitleTrack } from '../extractors';
+import { extractStreamUrl, extractKiwiMapper, extractVidstream, SubtitleTrack } from '../extractors';
+import { BASE_URL } from '../constants';
 
 export interface VideoServer {
-  id: string; // linkId
-  name: string; // server name (e.g. Vidstreaming, MegaCloud)
-  type: string; // "sub" | "dub" | "softsub"
+  id: string;    // linkId
+  name: string;  // server name (e.g. Vidstreaming, MegaCloud)
+  type: string;  // "sub" | "dub" | "softsub"
+  svId?: string; // data-sv-id (server type identifier used by anikoto AJAX)
 }
 
 export interface VideoTrack extends SubtitleTrack {
@@ -28,6 +30,18 @@ export interface WatchData {
   episode: Episode;
   servers: VideoServer[];
   sources: VideoSource[];
+}
+
+/** Cap individual server fetch+extraction so a single slow server can't block everything. */
+const SERVER_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timed out after ${ms}ms (${label})`)), ms)
+    ),
+  ]);
 }
 
 export async function scrapeWatch(slug: string, epNum: string): Promise<WatchData> {
@@ -58,60 +72,126 @@ export async function scrapeWatch(slug: string, epNum: string): Promise<WatchDat
     const $typeContainer = $el.closest('.type');
     const typeLabel = $typeContainer.find('label, .name').text().trim().toLowerCase();
     const serverName = $el.text().trim();
+    const svId = $el.attr('data-sv-id') || '';
 
     servers.push({
       id: linkId,
       name: serverName,
       type: typeLabel || 'sub',
+      svId,
     });
   });
 
   // Helper to generate proxy URLs using either Cloudflare Worker or internal Next.js proxy
   const getProxyUrl = (targetUrl: string, referer?: string) => {
     const rawBaseUrl = process.env.NEXT_PUBLIC_CF_WORKER_URL || process.env.CF_WORKER_URL || '/api/proxy';
-    const baseUrl = rawBaseUrl.trim();
+    let baseUrl = rawBaseUrl.trim();
+    // Normalize: add https:// if the value is a bare domain (no protocol, not a relative path)
+    if (baseUrl && !baseUrl.startsWith('http') && !baseUrl.startsWith('/')) {
+      baseUrl = `https://${baseUrl}`;
+    }
     const separator = baseUrl.includes('?') ? '&' : '?';
     const urlParam = `url=${encodeURIComponent(targetUrl)}`;
     const refererParam = referer ? `&referer=${encodeURIComponent(referer)}` : '';
-    
-    if (baseUrl.endsWith('/')) {
-      return `${baseUrl}?${urlParam}${refererParam}`;
-    }
     return `${baseUrl}${separator}${urlParam}${refererParam}`;
   };
 
-  // 2. Fetch all iframe URLs
+  // 2. Fetch embed URL + extract m3u8 for all servers in parallel.
+  //    Each server is individually capped at SERVER_TIMEOUT_MS so a single
+  //    slow/unreachable server cannot stall the entire response.
   const sources: VideoSource[] = [];
-  
-  await Promise.all(
-    servers.map(async (server) => {
-      try {
-        const sourceData = await fetchJson<{ status: boolean; result: { url: string } }>(
-          `/ajax/server?get=${server.id}`
-        );
-        if (sourceData.status && sourceData.result?.url) {
-          const embedUrl = sourceData.result.url;
-          // 3. Extract the actual m3u8 stream link and referer
-          const extracted = await extractStreamUrl(embedUrl);
 
+  // ── Kiwi Mapper source (independent, runs alongside regular servers) ───────
+  // Uses mapper.mewcdn.online API which returns stream URLs from a CDN
+  // that is NOT behind Cloudflare bot-protection (kwik.cx2.mewcdn.online).
+  // Requires data-mal and data-timestamp attributes from the episode element.
+  const kiwiTask = (async () => {
+    if (!ep.dataMal || !ep.dataTimestamp) return;
+    for (const type of ['sub', 'dub'] as const) {
+      try {
+        const extracted = await withTimeout(
+          extractKiwiMapper(ep.dataMal, ep.number, ep.dataTimestamp, type, BASE_URL),
+          SERVER_TIMEOUT_MS,
+          `Kiwi Mapper (${type})`
+        );
+        if (extracted) {
           sources.push({
-            server: server.name,
-            type: server.type,
-            url: embedUrl,
-            m3u8: extracted?.m3u8 ?? null,
-            referer: extracted?.referer,
-            proxyUrl: extracted?.m3u8 ? getProxyUrl(extracted.m3u8, extracted.referer) : null,
-            tracks: extracted?.tracks?.map(t => ({
+            server: 'Kiwi Stream',
+            type,
+            url: extracted.m3u8,
+            m3u8: extracted.m3u8,
+            referer: extracted.referer,
+            proxyUrl: getProxyUrl(extracted.m3u8, extracted.referer),
+            tracks: extracted.tracks?.map(t => ({
               ...t,
               proxyUrl: getProxyUrl(t.file, extracted.referer)
             })) || [],
           });
         }
       } catch (err) {
-        console.error(`Failed to fetch source for server ${server.id}`, err);
+        console.error(`Skipping Kiwi Mapper (${type}):`, err instanceof Error ? err.message : err);
+      }
+    }
+  })();
+
+  await Promise.all([
+    kiwiTask,
+    ...servers.map(async (server) => {
+      try {
+        await withTimeout(
+          (async () => {
+            // Build AJAX URL — include sv (server type ID) when available, as some
+            // servers (e.g. VidPlay) require it to avoid a 400 response.
+            const svParam = server.svId ? `&sv=${server.svId}` : '';
+            const epReferer = `${BASE_URL}/watch/${slug}/ep-${epNum}`;
+            const sourceData = await fetchJson<{ status: boolean; result: { url: string } }>(
+              `/ajax/server?get=${server.id}${svParam}`,
+              { Referer: epReferer }
+            );
+            if (sourceData.status && sourceData.result?.url) {
+              const embedUrl = sourceData.result.url;
+              const epRefererFull = `${BASE_URL}/watch/${slug}/ep-${epNum}`;
+
+              // ── VidStream path: try save_data.php first ──────────────────
+              // Detects servers that use domain2_url + save_data.php pattern.
+              // Falls back to the standard extractStreamUrl if this fails.
+              const serverNameLower = server.name.toLowerCase();
+              const isVidstreamLike =
+                serverNameLower.includes('vidstream') ||
+                serverNameLower.includes('vidplay') ||
+                serverNameLower.includes('vid-');
+
+              let extracted = isVidstreamLike
+                ? await extractVidstream(embedUrl, epRefererFull).catch(() => null)
+                : null;
+
+              // Fall back to standard extraction if VidStream path didn't work
+              if (!extracted) {
+                extracted = await extractStreamUrl(embedUrl);
+              }
+
+              sources.push({
+                server: server.name,
+                type: server.type,
+                url: embedUrl,
+                m3u8: extracted?.m3u8 ?? null,
+                referer: extracted?.referer,
+                proxyUrl: extracted?.m3u8 ? getProxyUrl(extracted.m3u8, extracted.referer) : null,
+                tracks: extracted?.tracks?.map(t => ({
+                  ...t,
+                  proxyUrl: getProxyUrl(t.file, extracted!.referer)
+                })) || [],
+              });
+            }
+          })(),
+          SERVER_TIMEOUT_MS,
+          server.name
+        );
+      } catch (err) {
+        console.error(`Skipping server ${server.name} (${server.id}):`, err instanceof Error ? err.message : err);
       }
     })
-  );
+  ]);
 
   return {
     episode: ep,

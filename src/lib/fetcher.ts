@@ -16,14 +16,16 @@ export async function fetchPage(path: string): Promise<cheerio.CheerioAPI> {
 
 /**
  * Fetch JSON from the site's internal AJAX endpoints.
+ * @param extraHeaders - Optional additional headers to merge (e.g. a per-request Referer).
  */
-export async function fetchJson<T = unknown>(path: string): Promise<T> {
+export async function fetchJson<T = unknown>(path: string, extraHeaders?: Record<string, string>): Promise<T> {
   const url = path.startsWith('http') ? path : `${BASE_URL}${path}`;
   const { data } = await axios.get<T>(url, {
     headers: {
       ...DEFAULT_HEADERS,
       Accept: 'application/json, text/javascript, */*',
       'X-Requested-With': 'XMLHttpRequest',
+      ...extraHeaders,
     },
     timeout: 15_000,
   });
